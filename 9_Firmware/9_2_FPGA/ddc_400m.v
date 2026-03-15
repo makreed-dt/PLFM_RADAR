@@ -54,9 +54,13 @@ reg [2:0] saturation_count;
 reg overflow_detected;
 reg [7:0] error_counter;
 
-// CDC synchronization for control signals
-reg mixers_enable_sync;
-reg bypass_mode_sync;
+// CDC synchronization for control signals (2-stage synchronizers)
+(* ASYNC_REG = "TRUE" *) reg [1:0] mixers_enable_sync_chain;
+(* ASYNC_REG = "TRUE" *) reg [1:0] bypass_mode_sync_chain;
+(* ASYNC_REG = "TRUE" *) reg [1:0] force_saturation_sync_chain;
+wire mixers_enable_sync;
+wire bypass_mode_sync;
+wire force_saturation_sync;
 
 // Debug monitoring signals
 reg [31:0] sample_counter;
@@ -66,14 +70,15 @@ wire signed [17:0] debug_mixed_q_trunc;
 // Real-time status monitoring
 reg [7:0] signal_power_i, signal_power_q;
 
-// Enhanced saturation injection for testing
-reg force_saturation_sync;
-
 // Internal mixing signals
-reg signed [MIXER_WIDTH-1:0] adc_signed;
+// DSP48E1 with AREG=1, BREG=1, MREG=1, PREG=1 handles all internal pipelining
+// Latency: 3 cycles (1 for AREG/BREG, 1 for MREG, 1 for PREG)
+wire signed [MIXER_WIDTH-1:0] adc_signed_w;
 reg signed [MIXER_WIDTH + NCO_WIDTH -1:0] mixed_i, mixed_q;
 reg mixed_valid;
 reg mixer_overflow_i, mixer_overflow_q;
+// Pipeline valid tracking: 3-stage shift register to match DSP48E1 AREG+MREG+PREG latency
+reg [2:0] dsp_valid_pipe;
 
 // Output stage registers
 reg signed [17:0] baseband_i_reg, baseband_q_reg;
@@ -83,7 +88,7 @@ reg baseband_valid_reg;
 // Phase Dithering Signals
 // ============================================================================
 wire [7:0] phase_dither_bits;
-wire [31:0] phase_inc_dithered;
+reg [31:0] phase_inc_dithered;
 
 
 
@@ -97,17 +102,21 @@ assign debug_mixed_i_trunc = mixed_i[25:8];
 assign debug_mixed_q_trunc = mixed_q[25:8];
 
 // ============================================================================
-// Clock Domain Crossing for Control Signals
+// Clock Domain Crossing for Control Signals (2-stage synchronizers)
 // ============================================================================
+assign mixers_enable_sync = mixers_enable_sync_chain[1];
+assign bypass_mode_sync = bypass_mode_sync_chain[1];
+assign force_saturation_sync = force_saturation_sync_chain[1];
+
 always @(posedge clk_400m or negedge reset_n) begin
     if (!reset_n) begin
-        mixers_enable_sync <= 1'b0;
-        bypass_mode_sync <= 1'b0;
-        force_saturation_sync <= 1'b0;
+        mixers_enable_sync_chain <= 2'b00;
+        bypass_mode_sync_chain <= 2'b00;
+        force_saturation_sync_chain <= 2'b00;
     end else begin
-        mixers_enable_sync <= mixers_enable;
-        bypass_mode_sync <= bypass_mode;
-        force_saturation_sync <= force_saturation;
+        mixers_enable_sync_chain <= {mixers_enable_sync_chain[0], mixers_enable};
+        bypass_mode_sync_chain <= {bypass_mode_sync_chain[0], bypass_mode};
+        force_saturation_sync_chain <= {force_saturation_sync_chain[0], force_saturation};
     end
 end
 
@@ -117,7 +126,6 @@ end
 always @(posedge clk_400m or negedge reset_n) begin
     if (!reset_n || reset_monitors) begin
         sample_counter <= 0;
-        saturation_count <= 0;
         error_counter <= 0;
     end else if (adc_data_valid_i && adc_data_valid_q ) begin
         sample_counter <= sample_counter + 1;
@@ -143,8 +151,13 @@ lfsr_dither_enhanced #(
 // Calculate phase increment for 120MHz IF at 400MHz sampling
 localparam PHASE_INC_120MHZ = 32'h4CCCCCCD;
 
-// Apply dithering to reduce spurious tones
-assign phase_inc_dithered = PHASE_INC_120MHZ + {24'b0, phase_dither_bits};
+// Apply dithering to reduce spurious tones (registered for 400 MHz timing)
+always @(posedge clk_400m or negedge reset_n) begin
+    if (!reset_n)
+        phase_inc_dithered <= PHASE_INC_120MHZ;
+    else
+        phase_inc_dithered <= PHASE_INC_120MHZ + {24'b0, phase_dither_bits};
+end
 
 // ============================================================================
 // Enhanced NCO with Diagnostics
@@ -161,11 +174,261 @@ nco_400m_enhanced nco_core (
 );
 
 // ============================================================================
-// Enhanced Mixing Stage with AGC
+// Enhanced Mixing Stage — DSP48E1 direct instantiation for 400 MHz timing
+//
+// Architecture:
+//   ADC data → sign-extend to 18b → DSP48E1 A-port (AREG=1 pipelines it)
+//   NCO cos/sin → sign-extend to 18b → DSP48E1 B-port (BREG=1 pipelines it)
+//   Multiply result captured by MREG=1, then output registered by PREG=1
+//   force_saturation override applied AFTER DSP48E1 output (not on input path)
+//
+// Latency: 3 clock cycles (AREG/BREG + MREG + PREG)
+// PREG=1 absorbs DSP48E1 CLK→P delay internally, preventing fabric timing violations
+// In simulation (Icarus), uses behavioral equivalent since DSP48E1 is Xilinx-only
+// ============================================================================
+
+// Combinational ADC sign conversion (no register — DSP48E1 AREG handles it)
+assign adc_signed_w = {1'b0, adc_data, {(MIXER_WIDTH-ADC_WIDTH-1){1'b0}}} - 
+                      {1'b0, {ADC_WIDTH{1'b1}}, {(MIXER_WIDTH-ADC_WIDTH-1){1'b0}}} / 2;
+
+// Valid pipeline: 3-stage shift register matching DSP48E1 AREG+MREG+PREG latency
+always @(posedge clk_400m or negedge reset_n) begin
+    if (!reset_n) begin
+        dsp_valid_pipe <= 3'b000;
+    end else begin
+        dsp_valid_pipe <= {dsp_valid_pipe[1:0], (nco_ready && adc_data_valid_i && adc_data_valid_q)};
+    end
+end
+
+`ifdef SIMULATION
+// ---- Behavioral model for Icarus Verilog simulation ----
+// Mimics DSP48E1 with AREG=1, BREG=1, MREG=1, PREG=1 (3-cycle latency)
+reg signed [MIXER_WIDTH-1:0] adc_signed_reg;     // Models AREG
+reg signed [15:0] cos_pipe_reg, sin_pipe_reg;     // Models BREG
+reg signed [MIXER_WIDTH+NCO_WIDTH-1:0] mult_i_internal, mult_q_internal;  // Models MREG
+reg signed [MIXER_WIDTH+NCO_WIDTH-1:0] mult_i_reg, mult_q_reg;            // Models PREG
+
+// Stage 1: AREG/BREG equivalent
+always @(posedge clk_400m or negedge reset_n) begin
+    if (!reset_n) begin
+        adc_signed_reg <= 0;
+        cos_pipe_reg <= 0;
+        sin_pipe_reg <= 0;
+    end else begin
+        adc_signed_reg <= adc_signed_w;
+        cos_pipe_reg <= cos_out;
+        sin_pipe_reg <= sin_out;
+    end
+end
+
+// Stage 2: MREG equivalent
+always @(posedge clk_400m or negedge reset_n) begin
+    if (!reset_n) begin
+        mult_i_internal <= 0;
+        mult_q_internal <= 0;
+    end else begin
+        mult_i_internal <= $signed(adc_signed_reg) * $signed(cos_pipe_reg);
+        mult_q_internal <= $signed(adc_signed_reg) * $signed(sin_pipe_reg);
+    end
+end
+
+// Stage 3: PREG equivalent
+always @(posedge clk_400m or negedge reset_n) begin
+    if (!reset_n) begin
+        mult_i_reg <= 0;
+        mult_q_reg <= 0;
+    end else begin
+        mult_i_reg <= mult_i_internal;
+        mult_q_reg <= mult_q_internal;
+    end
+end
+
+`else
+// ---- Direct DSP48E1 instantiation for Vivado synthesis ----
+// This guarantees AREG/BREG/MREG are used, achieving timing closure at 400 MHz
+wire [47:0] dsp_p_i, dsp_p_q;
+
+// DSP48E1 for I-channel mixer (adc_signed * cos_out)
+DSP48E1 #(
+    // Feature control attributes
+    .A_INPUT("DIRECT"),
+    .B_INPUT("DIRECT"),
+    .USE_DPORT("FALSE"),
+    .USE_MULT("MULTIPLY"),
+    .USE_SIMD("ONE48"),
+    // Pipeline register attributes — all enabled for max timing
+    .AREG(1),
+    .BREG(1),
+    .MREG(1),
+    .PREG(1),           // P register enabled — absorbs CLK→P delay for timing closure
+    .ADREG(0),
+    .ACASCREG(1),
+    .BCASCREG(1),
+    .ALUMODEREG(0),
+    .CARRYINREG(0),
+    .CARRYINSELREG(0),
+    .CREG(0),
+    .DREG(0),
+    .INMODEREG(0),
+    .OPMODEREG(0),
+    // Pattern detector (unused)
+    .AUTORESET_PATDET("NO_RESET"),
+    .MASK(48'h3fffffffffff),
+    .PATTERN(48'h000000000000),
+    .SEL_MASK("MASK"),
+    .SEL_PATTERN("PATTERN"),
+    .USE_PATTERN_DETECT("NO_PATDET")
+) dsp_mixer_i (
+    // Clock and reset
+    .CLK(clk_400m),
+    .RSTA(!reset_n),
+    .RSTB(!reset_n),
+    .RSTM(!reset_n),
+    .RSTP(!reset_n),
+    .RSTALLCARRYIN(1'b0),
+    .RSTALUMODE(1'b0),
+    .RSTCTRL(1'b0),
+    .RSTC(1'b0),
+    .RSTD(1'b0),
+    .RSTINMODE(1'b0),
+    // Clock enables
+    .CEA1(1'b0),       // AREG=1 uses CEA2
+    .CEA2(1'b1),
+    .CEB1(1'b0),       // BREG=1 uses CEB2
+    .CEB2(1'b1),
+    .CEM(1'b1),
+    .CEP(1'b1),         // P register clock enable (PREG=1)
+    .CEAD(1'b0),
+    .CEALUMODE(1'b0),
+    .CECARRYIN(1'b0),
+    .CECTRL(1'b0),
+    .CEC(1'b0),
+    .CED(1'b0),
+    .CEINMODE(1'b0),
+    // Data ports
+    .A({{12{adc_signed_w[MIXER_WIDTH-1]}}, adc_signed_w}),   // Sign-extend 18b to 30b
+    .B({{2{cos_out[15]}}, cos_out}),                          // Sign-extend 16b to 18b
+    .C(48'b0),
+    .D(25'b0),
+    .CARRYIN(1'b0),
+    // Control ports
+    .OPMODE(7'b0000101),       // P = M (multiply only, no accumulate)
+    .ALUMODE(4'b0000),         // Z + X + Y + CIN
+    .INMODE(5'b00000),         // A2 * B2 (direct)
+    .CARRYINSEL(3'b000),
+    // Output ports
+    .P(dsp_p_i),
+    .PATTERNDETECT(),
+    .PATTERNBDETECT(),
+    .OVERFLOW(),
+    .UNDERFLOW(),
+    .CARRYOUT(),
+    // Cascade ports (unused)
+    .ACIN(30'b0),
+    .BCIN(18'b0),
+    .CARRYCASCIN(1'b0),
+    .MULTSIGNIN(1'b0),
+    .PCIN(48'b0),
+    .ACOUT(),
+    .BCOUT(),
+    .CARRYCASCOUT(),
+    .MULTSIGNOUT(),
+    .PCOUT()
+);
+
+// DSP48E1 for Q-channel mixer (adc_signed * sin_out)
+DSP48E1 #(
+    .A_INPUT("DIRECT"),
+    .B_INPUT("DIRECT"),
+    .USE_DPORT("FALSE"),
+    .USE_MULT("MULTIPLY"),
+    .USE_SIMD("ONE48"),
+    .AREG(1),
+    .BREG(1),
+    .MREG(1),
+    .PREG(1),
+    .ADREG(0),
+    .ACASCREG(1),
+    .BCASCREG(1),
+    .ALUMODEREG(0),
+    .CARRYINREG(0),
+    .CARRYINSELREG(0),
+    .CREG(0),
+    .DREG(0),
+    .INMODEREG(0),
+    .OPMODEREG(0),
+    .AUTORESET_PATDET("NO_RESET"),
+    .MASK(48'h3fffffffffff),
+    .PATTERN(48'h000000000000),
+    .SEL_MASK("MASK"),
+    .SEL_PATTERN("PATTERN"),
+    .USE_PATTERN_DETECT("NO_PATDET")
+) dsp_mixer_q (
+    .CLK(clk_400m),
+    .RSTA(!reset_n),
+    .RSTB(!reset_n),
+    .RSTM(!reset_n),
+    .RSTP(!reset_n),
+    .RSTALLCARRYIN(1'b0),
+    .RSTALUMODE(1'b0),
+    .RSTCTRL(1'b0),
+    .RSTC(1'b0),
+    .RSTD(1'b0),
+    .RSTINMODE(1'b0),
+    .CEA1(1'b0),
+    .CEA2(1'b1),
+    .CEB1(1'b0),
+    .CEB2(1'b1),
+    .CEM(1'b1),
+    .CEP(1'b1),         // P register clock enable (PREG=1)
+    .CEAD(1'b0),
+    .CEALUMODE(1'b0),
+    .CECARRYIN(1'b0),
+    .CECTRL(1'b0),
+    .CEC(1'b0),
+    .CED(1'b0),
+    .CEINMODE(1'b0),
+    .A({{12{adc_signed_w[MIXER_WIDTH-1]}}, adc_signed_w}),
+    .B({{2{sin_out[15]}}, sin_out}),
+    .C(48'b0),
+    .D(25'b0),
+    .CARRYIN(1'b0),
+    .OPMODE(7'b0000101),
+    .ALUMODE(4'b0000),
+    .INMODE(5'b00000),
+    .CARRYINSEL(3'b000),
+    .P(dsp_p_q),
+    .PATTERNDETECT(),
+    .PATTERNBDETECT(),
+    .OVERFLOW(),
+    .UNDERFLOW(),
+    .CARRYOUT(),
+    .ACIN(30'b0),
+    .BCIN(18'b0),
+    .CARRYCASCIN(1'b0),
+    .MULTSIGNIN(1'b0),
+    .PCIN(48'b0),
+    .ACOUT(),
+    .BCOUT(),
+    .CARRYCASCOUT(),
+    .MULTSIGNOUT(),
+    .PCOUT()
+);
+
+// Extract the multiply result from DSP48E1 P output
+// adc_signed is 18 bits, NCO is 16 bits → product is 34 bits (bits [33:0] of P)
+wire signed [MIXER_WIDTH+NCO_WIDTH-1:0] mult_i_reg = dsp_p_i[MIXER_WIDTH+NCO_WIDTH-1:0];
+wire signed [MIXER_WIDTH+NCO_WIDTH-1:0] mult_q_reg = dsp_p_q[MIXER_WIDTH+NCO_WIDTH-1:0];
+
+`endif
+
+// ============================================================================
+// Post-DSP48E1 output stage: force_saturation override + overflow detection
+// force_saturation mux is intentionally AFTER the DSP48E1 output to avoid
+// polluting the critical input path with extra logic
 // ============================================================================
 always @(posedge clk_400m or negedge reset_n) begin
     if (!reset_n) begin
-        adc_signed <= 0;
         mixed_i <= 0;
         mixed_q <= 0;
         mixed_valid <= 0;
@@ -173,29 +436,23 @@ always @(posedge clk_400m or negedge reset_n) begin
         mixer_overflow_q <= 0;
         saturation_count <= 0;
         overflow_detected <= 0;
-    end else if (nco_ready && adc_data_valid_i && adc_data_valid_q) begin
-        // Convert ADC data to signed with extended precision
-        adc_signed <= {1'b0, adc_data, {(MIXER_WIDTH-ADC_WIDTH-1){1'b0}}} - 
-                     {1'b0, {ADC_WIDTH{1'b1}}, {(MIXER_WIDTH-ADC_WIDTH-1){1'b0}}} / 2;
-        
-        // Force saturation for testing
+    end else if (dsp_valid_pipe[2]) begin
+        // Force saturation for testing (applied after DSP output, not on input path)
         if (force_saturation_sync) begin
-            mixed_i <= 34'h1FFFFFFFF;  // Force positive saturation
-            mixed_q <= 34'h200000000;  // Force negative saturation
+            mixed_i <= 34'h1FFFFFFFF;
+            mixed_q <= 34'h200000000;
             mixer_overflow_i <= 1'b1;
             mixer_overflow_q <= 1'b1;
         end else begin
-
-                // Normal mixing
-                mixed_i <= $signed(adc_signed) * $signed(cos_out);
-                mixed_q <= $signed(adc_signed) * $signed(sin_out);
+            // Normal path: take DSP48E1 multiply result
+            mixed_i <= mult_i_reg;
+            mixed_q <= mult_q_reg;
             
-            
-            // Enhanced overflow detection with counting
-            mixer_overflow_i <= (mixed_i > (2**(MIXER_WIDTH+NCO_WIDTH-2)-1)) || 
-                               (mixed_i < -(2**(MIXER_WIDTH+NCO_WIDTH-2)));
-            mixer_overflow_q <= (mixed_q > (2**(MIXER_WIDTH+NCO_WIDTH-2)-1)) || 
-                               (mixed_q < -(2**(MIXER_WIDTH+NCO_WIDTH-2)));
+            // Overflow detection on current cycle's multiply result
+            mixer_overflow_i <= (mult_i_reg > (2**(MIXER_WIDTH+NCO_WIDTH-2)-1)) || 
+                               (mult_i_reg < -(2**(MIXER_WIDTH+NCO_WIDTH-2)));
+            mixer_overflow_q <= (mult_q_reg > (2**(MIXER_WIDTH+NCO_WIDTH-2)-1)) || 
+                               (mult_q_reg < -(2**(MIXER_WIDTH+NCO_WIDTH-2)));
         end
         
         mixed_valid <= 1;

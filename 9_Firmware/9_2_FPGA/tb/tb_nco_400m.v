@@ -259,16 +259,16 @@ module tb_nco_400m;
         #1;
         sin_before_gate = sin_out;
 
-        // Deassert phase_valid
+        // Deassert phase_valid — with 4-stage pipeline, dds_ready has 5-cycle latency
         phase_valid = 0;
-        @(posedge clk_400m); #1;
+        repeat (6) @(posedge clk_400m); #1;
         check(dds_ready === 1'b0, "dds_ready deasserts when phase_valid=0");
 
         repeat (10) @(posedge clk_400m);
 
-        // Re-enable
+        // Re-enable — wait for pipeline to refill (5 cycles)
         phase_valid = 1;
-        @(posedge clk_400m); #1;
+        repeat (6) @(posedge clk_400m); #1;
         check(dds_ready === 1'b1, "dds_ready re-asserts when phase_valid=1");
 
         // ════════════════════════════════════════════════════════
@@ -285,8 +285,8 @@ module tb_nco_400m;
         frequency_tuning_word = FTW_10MHZ;
         phase_valid = 1;
 
-        // Skip pipeline warmup
-        repeat (3) @(posedge clk_400m);
+        // Skip pipeline warmup (4-stage pipeline + 1 for dds_ready)
+        repeat (5) @(posedge clk_400m);
 
         mag_sq_min = 32'hFFFFFFFF;
         mag_sq_max = 32'h00000000;

@@ -2,6 +2,9 @@
 
 // ============================================================================
 // CDC FOR MULTI-BIT DATA (ADVANCED)
+// Uses Gray-code encoding with synchronous reset on sync chain to avoid
+// latch inference. ASYNC_REG attributes ensure Vivado places synchronizer
+// FFs in the same slice for optimal MTBF.
 // ============================================================================
 module cdc_adc_to_processing #(
     parameter WIDTH = 8,
@@ -38,15 +41,16 @@ module cdc_adc_to_processing #(
     // Source domain registers
     reg [WIDTH-1:0] src_data_reg;
     reg [1:0] src_toggle = 2'b00;
-    reg src_toggle_sync = 0;
     
-    // Destination domain registers
-    reg [WIDTH-1:0] dst_data_gray [0:STAGES-1];
-    reg [1:0] dst_toggle_sync [0:STAGES-1];
+    // Destination domain synchronizer registers
+    // ASYNC_REG on memory arrays applies to all elements
+    (* ASYNC_REG = "TRUE" *) reg [WIDTH-1:0] dst_data_gray [0:STAGES-1];
+    (* ASYNC_REG = "TRUE" *) reg [1:0] dst_toggle_sync [0:STAGES-1];
     reg [WIDTH-1:0] dst_data_reg;
     reg dst_valid_reg = 0;
     reg [1:0] prev_dst_toggle = 2'b00;
     
+    // Source domain: capture data and toggle
     always @(posedge src_clk or negedge reset_n) begin
         if (!reset_n) begin
             src_data_reg <= 0;
@@ -57,17 +61,16 @@ module cdc_adc_to_processing #(
         end
     end
     
-    // CDC synchronization chain for data
+    // CDC synchronization chain for data — SYNCHRONOUS RESET
+    // Using synchronous reset avoids latch inference in Vivado.
+    // For CDC synchronizers, synchronous reset is preferred because
+    // the reset value is sampled safely within the clock domain.
     genvar i;
     generate
         for (i = 0; i < STAGES; i = i + 1) begin : data_sync_chain
-            always @(posedge dst_clk or negedge reset_n) begin
+            always @(posedge dst_clk) begin
                 if (!reset_n) begin
-                    if (i == 0) begin
-                        dst_data_gray[i] <= 0;
-                    end else begin
-                        dst_data_gray[i] <= dst_data_gray[i-1];
-                    end
+                    dst_data_gray[i] <= 0;
                 end else begin
                     if (i == 0) begin
                         // Convert to gray code at domain crossing
@@ -80,13 +83,9 @@ module cdc_adc_to_processing #(
         end
         
         for (i = 0; i < STAGES; i = i + 1) begin : toggle_sync_chain
-            always @(posedge dst_clk or negedge reset_n) begin
+            always @(posedge dst_clk) begin
                 if (!reset_n) begin
-                    if (i == 0) begin
-                        dst_toggle_sync[i] <= 2'b00;
-                    end else begin
-                        dst_toggle_sync[i] <= dst_toggle_sync[i-1];
-                    end
+                    dst_toggle_sync[i] <= 2'b00;
                 end else begin
                     if (i == 0) begin
                         dst_toggle_sync[i] <= src_toggle;
@@ -136,7 +135,7 @@ module cdc_single_bit #(
     output wire dst_signal
 );
 
-    reg [STAGES-1:0] sync_chain;
+    (* ASYNC_REG = "TRUE" *) reg [STAGES-1:0] sync_chain;
     
     always @(posedge dst_clk or negedge reset_n) begin
         if (!reset_n) begin
@@ -171,13 +170,13 @@ module cdc_handshake #(
     reg [WIDTH-1:0] src_data_reg;
     reg src_busy = 0;
     reg src_ack_sync = 0;
-    reg [1:0] src_ack_sync_chain = 2'b00;
+    (* ASYNC_REG = "TRUE" *) reg [1:0] src_ack_sync_chain = 2'b00;
     
     // Destination domain
     reg [WIDTH-1:0] dst_data_reg;
     reg dst_valid_reg = 0;
     reg dst_req_sync = 0;
-    reg [1:0] dst_req_sync_chain = 2'b00;
+    (* ASYNC_REG = "TRUE" *) reg [1:0] dst_req_sync_chain = 2'b00;
     reg dst_ack = 0;
     
     // Source clock domain

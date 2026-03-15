@@ -15,17 +15,20 @@ parameter STAGES = 5;
 parameter DECIMATION = 4;
 parameter COMB_DELAY = 1;
 
-// Increased bit width for 18-bit input with headroom
-reg signed [35:0] integrator [0:STAGES-1];  // 36-bit for better dynamic range
-reg signed [35:0] comb [0:STAGES-1];
-reg signed [35:0] comb_delay [0:STAGES-1][0:COMB_DELAY-1];
+// Accumulator width: input_width + N*log2(R) = 18 + 5*2 = 28 bits
+// (36-bit was over-provisioned; 28 bits is mathematically exact for R=4, N=5)
+localparam ACC_WIDTH = 28;
+
+reg signed [ACC_WIDTH-1:0] integrator [0:STAGES-1];
+reg signed [ACC_WIDTH-1:0] comb [0:STAGES-1];
+reg signed [ACC_WIDTH-1:0] comb_delay [0:STAGES-1][0:COMB_DELAY-1];
 
 // Enhanced control and monitoring
 reg [1:0] decimation_counter;
 reg data_valid_delayed;
 reg data_valid_comb;
 reg [7:0] output_counter;
-reg [35:0] max_integrator_value;
+reg [ACC_WIDTH-1:0] max_integrator_value;
 reg overflow_detected;
 reg overflow_latched;  // Latched overflow indicator
 
@@ -39,9 +42,15 @@ reg comb_saturation_detected;
 reg [7:0] comb_saturation_event_count;
 
 // Temporary signals for calculations
-reg signed [35:0] abs_integrator_value;
-reg signed [35:0] temp_scaled_output;
+reg signed [ACC_WIDTH-1:0] abs_integrator_value;
+reg signed [ACC_WIDTH-1:0] temp_scaled_output;
 reg signed [17:0] temp_output;  // Temporary output for proper range checking
+
+// Pipeline stage for saturation comparison — breaks CARRY4 chain from timing path
+reg sat_pos;            // temp_scaled_output > 131071 (registered)
+reg sat_neg;            // temp_scaled_output < -131072 (registered)
+reg signed [17:0] temp_output_pipe;  // Registered passthrough value
+reg data_out_valid_pipe; // Delayed valid for pipelined output
 
 integer i, j;
 
@@ -70,6 +79,10 @@ initial begin
     abs_integrator_value = 0;
     temp_scaled_output = 0;
     temp_output = 0;
+    sat_pos = 0;
+    sat_neg = 0;
+    temp_output_pipe = 0;
+    data_out_valid_pipe = 0;
     comb_overflow_latched = 0;
     comb_saturation_detected = 0;
     comb_saturation_event_count = 0;
@@ -106,54 +119,23 @@ always @(posedge clk or negedge reset_n) begin
         if (data_valid) begin
             sample_count <= sample_count + 1;
             
-            // First integrator stage with enhanced saturation detection
-            if (integrator[0] + $signed({{18{data_in[17]}}, data_in}) > (2**35 - 1)) begin
-                integrator[0] <= (2**35 - 1);
-                overflow_detected <= 1'b1;
-                overflow_latched <= 1'b1;
-                saturation_detected <= 1'b1;
-                saturation_event_count <= saturation_event_count + 1;
-                `ifdef SIMULATION
-                $display("CIC_SATURATION: Positive overflow at sample %0d", sample_count);
-                `endif
-            end else if (integrator[0] + $signed({{18{data_in[17]}}, data_in}) < -(2**35)) begin
-                integrator[0] <= -(2**35);
-                overflow_detected <= 1'b1;
-                overflow_latched <= 1'b1;
-                saturation_detected <= 1'b1;
-                saturation_event_count <= saturation_event_count + 1;
-                `ifdef SIMULATION
-                $display("CIC_SATURATION: Negative overflow at sample %0d", sample_count);
-                `endif
-            end else begin
-                integrator[0] <= integrator[0] + $signed({{18{data_in[17]}}, data_in});
-                overflow_detected <= 1'b0;  // Only clear immediate detection, not latched
-            end
+            // Integrator stages — standard CIC uses wrapping (modular) arithmetic.
+            // Saturation clamping is removed because CIC math relies on wrap-around;
+            // the comb stages difference successive integrator values, canceling wraps.
+            integrator[0] <= integrator[0] + {{(ACC_WIDTH-18){data_in[17]}}, data_in};
             
             // Calculate absolute value for monitoring
-            abs_integrator_value <= (integrator[0][35]) ? -integrator[0] : integrator[0];
+            abs_integrator_value <= (integrator[0][ACC_WIDTH-1]) ? -integrator[0] : integrator[0];
             
             // Track maximum integrator value for gain monitoring (absolute value)
             if (abs_integrator_value > max_integrator_value) begin
                 max_integrator_value <= abs_integrator_value;
-                max_value_monitor <= abs_integrator_value[31:24];
+                max_value_monitor <= abs_integrator_value[ACC_WIDTH-5:ACC_WIDTH-12];
             end
             
-            // Remaining integrator stages with saturation protection
+            // Remaining integrator stages — pure accumulation, no saturation
             for (i = 1; i < STAGES; i = i + 1) begin
-                if (integrator[i] + integrator[i-1] > (2**35 - 1)) begin
-                    integrator[i] <= (2**35 - 1);
-                    overflow_detected <= 1'b1;
-                    overflow_latched <= 1'b1;
-                    saturation_detected <= 1'b1;
-                end else if (integrator[i] + integrator[i-1] < -(2**35)) begin
-                    integrator[i] <= -(2**35);
-                    overflow_detected <= 1'b1;
-                    overflow_latched <= 1'b1;
-                    saturation_detected <= 1'b1;
-                end else begin
-                    integrator[i] <= integrator[i] + integrator[i-1];
-                end
+                integrator[i] <= integrator[i] + integrator[i-1];
             end
             
             // Enhanced decimation control
@@ -194,6 +176,10 @@ always @(posedge clk or negedge reset_n) begin
         data_out_valid <= 0;
         temp_scaled_output <= 0;
         temp_output <= 0;
+        sat_pos <= 0;
+        sat_neg <= 0;
+        temp_output_pipe <= 0;
+        data_out_valid_pipe <= 0;
         comb_overflow_latched <= 0;
         comb_saturation_detected <= 0;
         comb_saturation_event_count <= 0;
@@ -207,21 +193,11 @@ always @(posedge clk or negedge reset_n) begin
         end
 
         if (data_valid_comb) begin
-            // Enhanced comb processing with saturation check
+            // Comb processing — raw subtraction only (no saturation check needed;
+            // comb is a differencing stage, cannot overflow if integrators are bounded)
             for (i = 0; i < STAGES; i = i + 1) begin
                 if (i == 0) begin
-                    // Check for comb stage saturation
-                    if (integrator[STAGES-1] - comb_delay[0][COMB_DELAY-1] > (2**35 - 1)) begin
-                        comb[0] <= (2**35 - 1);
-                        comb_overflow_latched <= 1'b1;
-                        comb_saturation_detected <= 1'b1;
-                    end else if (integrator[STAGES-1] - comb_delay[0][COMB_DELAY-1] < -(2**35)) begin
-                        comb[0] <= -(2**35);
-                        comb_overflow_latched <= 1'b1;
-                        comb_saturation_detected <= 1'b1;
-                    end else begin
-                        comb[0] <= integrator[STAGES-1] - comb_delay[0][COMB_DELAY-1];
-                    end
+                    comb[0] <= integrator[STAGES-1] - comb_delay[0][COMB_DELAY-1];
                     
                     // Update delay line for first stage
                     for (j = COMB_DELAY-1; j > 0; j = j - 1) begin
@@ -229,18 +205,7 @@ always @(posedge clk or negedge reset_n) begin
                     end
                     comb_delay[0][0] <= integrator[STAGES-1];
                 end else begin
-                    // Check for comb stage saturation
-                    if (comb[i-1] - comb_delay[i][COMB_DELAY-1] > (2**35 - 1)) begin
-                        comb[i] <= (2**35 - 1);
-                        comb_overflow_latched <= 1'b1;
-                        comb_saturation_detected <= 1'b1;
-                    end else if (comb[i-1] - comb_delay[i][COMB_DELAY-1] < -(2**35)) begin
-                        comb[i] <= -(2**35);
-                        comb_overflow_latched <= 1'b1;
-                        comb_saturation_detected <= 1'b1;
-                    end else begin
-                        comb[i] <= comb[i-1] - comb_delay[i][COMB_DELAY-1];
-                    end
+                    comb[i] <= comb[i-1] - comb_delay[i][COMB_DELAY-1];
                     
                     // Update delay line
                     for (j = COMB_DELAY-1; j > 0; j = j - 1) begin
@@ -257,27 +222,36 @@ always @(posedge clk or negedge reset_n) begin
             // FIXED: Extract 18-bit output properly
             temp_output <= temp_scaled_output[17:0];
             
-            // FIXED: Proper saturation detection for 18-bit signed range
-            if (temp_scaled_output > 131071) begin        // 2^17 - 1
+            // Pipeline Stage 2: Register saturation comparison flags
+            // This breaks the CARRY4 chain out of the data_out critical path
+            sat_pos <= (temp_scaled_output > 131071);
+            sat_neg <= (temp_scaled_output < -131072);
+            temp_output_pipe <= temp_scaled_output[17:0];
+            data_out_valid_pipe <= 1;
+        end else begin
+            data_out_valid_pipe <= 0;
+        end
+        
+        // Pipeline Stage 3: MUX from registered comparison flags
+        if (data_out_valid_pipe) begin
+            if (sat_pos) begin
                 data_out <= 131071;
                 comb_overflow_latched <= 1'b1;
                 comb_saturation_detected <= 1'b1;
                 comb_saturation_event_count <= comb_saturation_event_count + 1;
                 `ifdef SIMULATION
-                $display("CIC_OUTPUT_SAT: TRUE Positive saturation, raw=%h, scaled=%h, temp_out=%d, final_out=%d", 
-                         comb[STAGES-1], temp_scaled_output, temp_output, 131071);
+                $display("CIC_OUTPUT_SAT: TRUE Positive saturation, final_out=%d", 131071);
                 `endif
-            end else if (temp_scaled_output < -131072) begin  // -2^17
+            end else if (sat_neg) begin
                 data_out <= -131072;
                 comb_overflow_latched <= 1'b1;
                 comb_saturation_detected <= 1'b1;
                 comb_saturation_event_count <= comb_saturation_event_count + 1;
                 `ifdef SIMULATION
-                $display("CIC_OUTPUT_SAT: TRUE Negative saturation, raw=%h, scaled=%h, temp_out=%d, final_out=%d", 
-                         comb[STAGES-1], temp_scaled_output, temp_output, -131072);
+                $display("CIC_OUTPUT_SAT: TRUE Negative saturation, final_out=%d", -131072);
                 `endif
             end else begin
-                data_out <= temp_output;
+                data_out <= temp_output_pipe;
                 comb_overflow_latched <= 1'b0;
                 comb_saturation_detected <= 1'b0;
             end

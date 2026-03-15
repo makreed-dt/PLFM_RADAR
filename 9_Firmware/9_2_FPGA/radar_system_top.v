@@ -191,7 +191,7 @@ BUFG bufg_ft601 (
 );
 
 // Reset synchronization (clk_100m domain)
-reg [1:0] reset_sync;
+(* ASYNC_REG = "TRUE" *) reg [1:0] reset_sync;
 always @(posedge clk_100m_buf or negedge reset_n) begin
     if (!reset_n) begin
         reset_sync <= 2'b00;
@@ -204,7 +204,7 @@ assign sys_reset_n = reset_sync[1];
 // Reset synchronization (clk_120m_dac domain)
 // Ensures reset deassertion is synchronous to the DAC clock,
 // preventing recovery/removal timing violations on 120 MHz FFs.
-reg [1:0] reset_sync_120m;
+(* ASYNC_REG = "TRUE" *) reg [1:0] reset_sync_120m;
 always @(posedge clk_120m_dac_buf or negedge reset_n) begin
     if (!reset_n) begin
         reset_sync_120m <= 2'b00;

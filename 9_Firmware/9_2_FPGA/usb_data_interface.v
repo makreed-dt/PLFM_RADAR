@@ -63,9 +63,9 @@ reg ft601_data_oe;  // Output enable for bidirectional data bus
 // Even though both are 100 MHz, they are asynchronous clocks and need synchronization.
 
 // 2-stage synchronizers for valid signals
-reg [1:0] range_valid_sync;
-reg [1:0] doppler_valid_sync;
-reg [1:0] cfar_valid_sync;
+(* ASYNC_REG = "TRUE" *) reg [1:0] range_valid_sync;
+(* ASYNC_REG = "TRUE" *) reg [1:0] doppler_valid_sync;
+(* ASYNC_REG = "TRUE" *) reg [1:0] cfar_valid_sync;
 
 // Synchronized data captures (registered in ft601_clk_in domain)
 reg [31:0] range_profile_cap;
