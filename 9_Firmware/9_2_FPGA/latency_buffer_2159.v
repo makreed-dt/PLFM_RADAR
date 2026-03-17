@@ -101,9 +101,28 @@ always @(posedge clk or negedge reset_n) begin
     end
 end
 
-// ========== OUTPUTS ==========
-assign data_out = bram[read_ptr];
-assign valid_out = valid_out_reg;
+// ========== BRAM READ (synchronous — required for Block RAM inference) ==========
+// Xilinx Block RAMs physically register the read output. An async read
+// (assign data_out = bram[addr]) forces Vivado to use distributed LUTRAM
+// instead, wasting ~704 LUTs. Registering the read adds 1 cycle of latency,
+// compensated by the valid pipeline stage below.
+reg [DATA_WIDTH-1:0] data_out_reg;
+
+always @(posedge clk) begin
+    data_out_reg <= bram[read_ptr];
+end
+
+// Pipeline valid_out_reg by 1 cycle to align with registered BRAM read
+reg valid_out_pipe;
+always @(posedge clk or negedge reset_n) begin
+    if (!reset_n)
+        valid_out_pipe <= 1'b0;
+    else
+        valid_out_pipe <= valid_out_reg;
+end
+
+assign data_out = data_out_reg;
+assign valid_out = valid_out_pipe;
 
 
 

@@ -130,7 +130,8 @@ module fv_cdc_adc;
     ) dut (
         .src_clk  (src_clk),
         .dst_clk  (dst_clk),
-        .reset_n  (reset_n),
+        .src_reset_n(reset_n),
+        .dst_reset_n(reset_n),
         .src_data (src_data),
         .src_valid(src_valid),
         .dst_data (dst_data),

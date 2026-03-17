@@ -547,7 +547,8 @@ cdc_adc_to_processing #(
 )CDC_FIR_i(
     .src_clk(clk_400m),
     .dst_clk(clk_100m),
-    .reset_n(reset_n),
+    .src_reset_n(reset_n_400m),
+    .dst_reset_n(reset_n),
     .src_data(cic_i_out),
     .src_valid(cic_valid_i),
     .dst_data(fir_d_in_i),
@@ -560,7 +561,8 @@ cdc_adc_to_processing #(
 )CDC_FIR_q(
     .src_clk(clk_400m),
     .dst_clk(clk_100m),
-    .reset_n(reset_n),
+    .src_reset_n(reset_n_400m),
+    .dst_reset_n(reset_n),
     .src_data(cic_q_out),
     .src_valid(cic_valid_q),
     .dst_data(fir_d_in_q),

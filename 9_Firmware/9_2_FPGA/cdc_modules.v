@@ -12,7 +12,8 @@ module cdc_adc_to_processing #(
 )(
     input wire src_clk,
     input wire dst_clk,
-    input wire reset_n,
+    input wire src_reset_n,
+    input wire dst_reset_n,
     input wire [WIDTH-1:0] src_data,
     input wire src_valid,
     output wire [WIDTH-1:0] dst_data,
@@ -59,7 +60,7 @@ module cdc_adc_to_processing #(
     // Gray encoding is registered in src_clk to avoid combinational logic
     // before the first synchronizer FF (fixes CDC-10 violations).
     always @(posedge src_clk) begin
-        if (!reset_n) begin
+        if (!src_reset_n) begin
             src_data_reg  <= 0;
             src_data_gray <= 0;
             src_toggle    <= 2'b00;
@@ -78,7 +79,7 @@ module cdc_adc_to_processing #(
     generate
         for (i = 0; i < STAGES; i = i + 1) begin : data_sync_chain
             always @(posedge dst_clk) begin
-                if (!reset_n) begin
+                if (!dst_reset_n) begin
                     dst_data_gray[i] <= 0;
                 end else begin
                     if (i == 0) begin
@@ -93,7 +94,7 @@ module cdc_adc_to_processing #(
         
         for (i = 0; i < STAGES; i = i + 1) begin : toggle_sync_chain
             always @(posedge dst_clk) begin
-                if (!reset_n) begin
+                if (!dst_reset_n) begin
                     dst_toggle_sync[i] <= 2'b00;
                 end else begin
                     if (i == 0) begin
@@ -108,7 +109,7 @@ module cdc_adc_to_processing #(
     
     // Detect new data — synchronous reset
     always @(posedge dst_clk) begin
-        if (!reset_n) begin
+        if (!dst_reset_n) begin
             dst_data_reg <= 0;
             dst_valid_reg <= 0;
             prev_dst_toggle <= 2'b00;

@@ -36,7 +36,8 @@ module tb_cdc_modules;
     // ════════════════════════════════════════════════════════════
     reg         m1_src_clk;
     reg         m1_dst_clk;
-    reg         m1_reset_n;
+    reg         m1_src_reset_n;
+    reg         m1_dst_reset_n;
     reg  [7:0]  m1_src_data;
     reg         m1_src_valid;
     wire [7:0]  m1_dst_data;
@@ -49,13 +50,14 @@ module tb_cdc_modules;
         .WIDTH(8),
         .STAGES(3)
     ) uut_m1 (
-        .src_clk  (m1_src_clk),
-        .dst_clk  (m1_dst_clk),
-        .reset_n  (m1_reset_n),
-        .src_data (m1_src_data),
-        .src_valid(m1_src_valid),
-        .dst_data (m1_dst_data),
-        .dst_valid(m1_dst_valid)
+        .src_clk     (m1_src_clk),
+        .dst_clk     (m1_dst_clk),
+        .src_reset_n (m1_src_reset_n),
+        .dst_reset_n (m1_dst_reset_n),
+        .src_data    (m1_src_data),
+        .src_valid   (m1_src_valid),
+        .dst_data    (m1_dst_data),
+        .dst_valid   (m1_dst_valid)
     );
 
     // ════════════════════════════════════════════════════════════
@@ -116,7 +118,8 @@ module tb_cdc_modules;
         $dumpvars(0, tb_cdc_modules);
 
         // Init all clocks and signals
-        m1_src_clk   = 0; m1_dst_clk   = 0; m1_reset_n   = 0;
+        m1_src_clk   = 0; m1_dst_clk   = 0;
+        m1_src_reset_n = 0; m1_dst_reset_n = 0;
         m1_src_data  = 0; m1_src_valid  = 0;
         m2_src_clk   = 0; m2_dst_clk   = 0; m2_reset_n   = 0;
         m2_src_signal = 0;
@@ -130,15 +133,15 @@ module tb_cdc_modules;
         $display("\n=== Section A: cdc_adc_to_processing (Gray-code CDC) ===");
 
         // ── A1: Reset behaviour ────────────────────────────────
-        $display("\n--- A1: Reset Behaviour ---");
-        m1_reset_n = 0;
+        $display("\n--- A1: Reset Behaviour (split-domain reset) ---");
+        m1_src_reset_n = 0; m1_dst_reset_n = 0;
         #100;  // let both clocks run
         check(m1_dst_valid === 1'b0, "M1: dst_valid = 0 during reset");
         check(m1_dst_data === 8'd0, "M1: dst_data = 0 during reset");
 
         // Release reset
         @(posedge m1_dst_clk);
-        m1_reset_n = 1;
+        m1_src_reset_n = 1; m1_dst_reset_n = 1;
         @(posedge m1_src_clk);
 
         // ── A2: Single value transfer ──────────────────────────
@@ -166,9 +169,9 @@ module tb_cdc_modules;
 
         // ── A3: Multiple sequential values ─────────────────────
         $display("\n--- A3: Multiple Sequential Values ---");
-        m1_reset_n = 0;
+        m1_src_reset_n = 0; m1_dst_reset_n = 0;
         #100;
-        m1_reset_n = 1;
+        m1_src_reset_n = 1; m1_dst_reset_n = 1;
         @(posedge m1_src_clk);
 
         begin : a3_block
@@ -239,9 +242,9 @@ module tb_cdc_modules;
 
         // ── A4: Slow sender (one value every 4 dst_clk cycles) ─
         $display("\n--- A4: Slow Sender ---");
-        m1_reset_n = 0;
+        m1_src_reset_n = 0; m1_dst_reset_n = 0;
         #100;
-        m1_reset_n = 1;
+        m1_src_reset_n = 1; m1_dst_reset_n = 1;
         @(posedge m1_src_clk);
 
         begin : a4_block
@@ -282,6 +285,176 @@ module tb_cdc_modules;
             end
             check(all_match, "M1: Slow-sent values match exactly");
         end
+
+        // ── A5: Split-Domain Reset — Src resets while dst stays active ──
+        $display("\n--- A5: Split-Domain Reset (src resets, dst active) ---");
+        m1_src_reset_n = 0; m1_dst_reset_n = 0;
+        m1_src_data = 0; m1_src_valid = 0;
+        #100;
+
+        // Release dst_reset_n first, src stays in reset
+        m1_dst_reset_n = 1;
+        begin : a5_dst_idle
+            integer wait_cycles;
+            reg saw_valid;
+            saw_valid = 0;
+            for (wait_cycles = 0; wait_cycles < 10; wait_cycles = wait_cycles + 1) begin
+                @(posedge m1_dst_clk); #1;
+                if (m1_dst_valid) saw_valid = 1;
+            end
+            check(!saw_valid, "M1: dst_valid stays 0 while src is in reset");
+        end
+
+        // Now release src_reset_n
+        m1_src_reset_n = 1;
+        @(posedge m1_src_clk);
+
+        // Send data and verify transfer works after staggered reset
+        m1_src_data  = 8'h3C;
+        m1_src_valid = 1;
+        @(posedge m1_src_clk); #1;
+        m1_src_valid = 0;
+
+        begin : a5_wait
+            integer wait_cycles;
+            for (wait_cycles = 0; wait_cycles < 20; wait_cycles = wait_cycles + 1) begin
+                @(posedge m1_dst_clk); #1;
+                if (m1_dst_valid) disable a5_wait;
+            end
+        end
+        check(m1_dst_valid === 1'b1, "M1: dst_valid asserts after staggered src reset release");
+        check(m1_dst_data === 8'h3C, "M1: data 0x3C correct after staggered src reset");
+
+        // ── A6: Split-Domain Reset — Dst resets while src stays active ──
+        // KEY test: catches the original P0 bug where a single reset from
+        // the src domain was used to reset dst-domain registers.
+        $display("\n--- A6: Split-Domain Reset (dst resets, src active) ---");
+        m1_src_reset_n = 1; m1_dst_reset_n = 1;
+        m1_src_data = 0; m1_src_valid = 0;
+        @(posedge m1_src_clk);
+
+        // Send data and verify it arrives (baseline)
+        m1_src_data  = 8'hF0;
+        m1_src_valid = 1;
+        @(posedge m1_src_clk); #1;
+        m1_src_valid = 0;
+
+        begin : a6_baseline
+            integer wait_cycles;
+            for (wait_cycles = 0; wait_cycles < 20; wait_cycles = wait_cycles + 1) begin
+                @(posedge m1_dst_clk); #1;
+                if (m1_dst_valid) disable a6_baseline;
+            end
+        end
+        check(m1_dst_data === 8'hF0, "M1: Baseline data 0xF0 received before dst-only reset");
+
+        // Assert ONLY dst_reset_n (src keeps running)
+        m1_dst_reset_n = 0;
+        begin : a6_check_reset
+            integer wait_cycles;
+            reg dst_cleared;
+            dst_cleared = 0;
+            for (wait_cycles = 0; wait_cycles < 10; wait_cycles = wait_cycles + 1) begin
+                @(posedge m1_dst_clk); #1;
+                if (m1_dst_data === 8'd0 && m1_dst_valid === 1'b0)
+                    dst_cleared = 1;
+            end
+            check(dst_cleared, "M1: dst_data=0 and dst_valid=0 after dst-only reset");
+        end
+
+        // Deassert dst_reset_n
+        m1_dst_reset_n = 1;
+        repeat (3) @(posedge m1_dst_clk);
+
+        // Send new data from src, verify it arrives correctly
+        m1_src_data  = 8'h55;
+        m1_src_valid = 1;
+        @(posedge m1_src_clk); #1;
+        m1_src_valid = 0;
+
+        begin : a6_recovery
+            integer wait_cycles;
+            for (wait_cycles = 0; wait_cycles < 20; wait_cycles = wait_cycles + 1) begin
+                @(posedge m1_dst_clk); #1;
+                if (m1_dst_valid) disable a6_recovery;
+            end
+        end
+        check(m1_dst_valid === 1'b1, "M1: dst_valid asserts after dst-only reset recovery");
+        check(m1_dst_data === 8'h55, "M1: data 0x55 correct after dst-only reset recovery");
+
+        // ── A7: Staggered Reset Deassertion ────────────────────
+        $display("\n--- A7: Staggered Reset Deassertion ---");
+        m1_src_reset_n = 0; m1_dst_reset_n = 0;
+        m1_src_data = 0; m1_src_valid = 0;
+        #100;
+
+        // Release src_reset_n first, start sending data immediately
+        m1_src_reset_n = 1;
+        @(posedge m1_src_clk);
+        m1_src_data  = 8'hBB;
+        m1_src_valid = 1;
+        @(posedge m1_src_clk); #1;
+        m1_src_valid = 0;
+
+        // Wait 50ns with dst_reset_n still asserted
+        #50;
+
+        // Release dst_reset_n
+        m1_dst_reset_n = 1;
+
+        // Let sync chain clear through a few dst_clk cycles first
+        repeat (5) @(posedge m1_dst_clk);
+
+        // Src sends another value so dst can capture it fresh
+        @(posedge m1_src_clk);
+        m1_src_data  = 8'hCC;
+        m1_src_valid = 1;
+        @(posedge m1_src_clk); #1;
+        m1_src_valid = 0;
+
+        begin : a7_wait
+            integer wait_cycles;
+            for (wait_cycles = 0; wait_cycles < 40; wait_cycles = wait_cycles + 1) begin
+                @(posedge m1_dst_clk); #1;
+                if (m1_dst_valid) disable a7_wait;
+            end
+        end
+        check(m1_dst_valid === 1'b1, "M1: dst_valid asserts after staggered deassertion");
+        // Accept either 0xBB (if pipeline retained) or 0xCC (if fresh capture)
+        check(m1_dst_data === 8'hBB || m1_dst_data === 8'hCC,
+              "M1: Data not corrupted after staggered deassertion");
+
+        // ── A8: Port Connectivity Check ────────────────────────
+        $display("\n--- A8: Port Connectivity Check ---");
+        m1_src_reset_n = 0; m1_dst_reset_n = 0;
+        m1_src_data = 0; m1_src_valid = 0;
+        #100;
+        m1_src_reset_n = 1; m1_dst_reset_n = 1;
+        repeat (5) @(posedge m1_dst_clk); #1;
+
+        // After reset deassertion, outputs should not be X or Z
+        check(m1_dst_data !== 8'bxxxxxxxx, "M1: dst_data is not X after reset");
+        check(m1_dst_data !== 8'bzzzzzzzz, "M1: dst_data is not Z after reset");
+        check(m1_dst_valid !== 1'bx, "M1: dst_valid is not X after reset");
+        check(m1_dst_valid !== 1'bz, "M1: dst_valid is not Z after reset");
+
+        // After a transfer, check again
+        m1_src_data  = 8'h99;
+        m1_src_valid = 1;
+        @(posedge m1_src_clk); #1;
+        m1_src_valid = 0;
+
+        begin : a8_wait
+            integer wait_cycles;
+            for (wait_cycles = 0; wait_cycles < 20; wait_cycles = wait_cycles + 1) begin
+                @(posedge m1_dst_clk); #1;
+                if (m1_dst_valid) disable a8_wait;
+            end
+        end
+        check(m1_dst_data !== 8'bxxxxxxxx, "M1: dst_data is not X after transfer");
+        check(m1_dst_data !== 8'bzzzzzzzz, "M1: dst_data is not Z after transfer");
+        check(m1_dst_valid !== 1'bx, "M1: dst_valid is not X after transfer");
+        check(m1_dst_valid !== 1'bz, "M1: dst_valid is not Z after transfer");
 
         // ════════════════════════════════════════════════════════
         // SECTION B: cdc_single_bit tests
@@ -393,6 +566,25 @@ module tb_cdc_modules;
         check(m2_dst_signal === 1'b0, "M2: Reset clears sync chain to 0");
         m2_reset_n = 1;
         m2_src_signal = 0;
+
+        // ── B7: Port Connectivity ──────────────────────────────
+        $display("\n--- B7: Port Connectivity ---");
+        m2_reset_n = 0;
+        m2_src_signal = 0;
+        #100;
+        m2_reset_n = 1;
+        repeat (5) @(posedge m2_dst_clk); #1;
+
+        check(m2_dst_signal !== 1'bx, "M2: dst_signal is not X after reset");
+        check(m2_dst_signal !== 1'bz, "M2: dst_signal is not Z after reset");
+
+        // Drive signal high and verify after propagation
+        m2_src_signal = 1;
+        repeat (8) @(posedge m2_dst_clk); #1;
+        check(m2_dst_signal !== 1'bx, "M2: dst_signal is not X after propagation");
+        check(m2_dst_signal !== 1'bz, "M2: dst_signal is not Z after propagation");
+        m2_src_signal = 0;
+        repeat (8) @(posedge m2_dst_clk);
 
         // ════════════════════════════════════════════════════════
         // SECTION C: cdc_handshake tests
@@ -603,6 +795,84 @@ module tb_cdc_modules;
             check(rx_idx == 4, "M3: All 4 edge-case values received");
             check(all_match, "M3: Edge-case values (0x0, 0xFFFF, 0x8000, 0x1) correct");
         end
+
+        // ── C6: Port Connectivity + Reset Recovery ─────────────
+        $display("\n--- C6: Port Connectivity + Reset Recovery ---");
+        m3_reset_n = 0;
+        m3_src_valid = 0;
+        m3_dst_ready = 0;
+        #200;
+        m3_reset_n = 1;
+        repeat (5) @(posedge m3_src_clk); #1;
+
+        // Port connectivity: outputs should not be X or Z after reset
+        check(m3_src_ready !== 1'bx, "M3: src_ready is not X after reset");
+        check(m3_src_ready !== 1'bz, "M3: src_ready is not Z after reset");
+        check(m3_dst_valid !== 1'bx, "M3: dst_valid is not X after reset");
+        check(m3_dst_valid !== 1'bz, "M3: dst_valid is not Z after reset");
+        check(m3_dst_data !== 32'hxxxxxxxx, "M3: dst_data is not X after reset");
+        check(m3_dst_data !== 32'hzzzzzzzz, "M3: dst_data is not Z after reset");
+
+        // Reset during active transfer: start a transfer, then assert reset mid-flight
+        m3_dst_ready = 1;
+
+        // Wait for src_ready
+        begin : c6_wait_ready
+            integer wait_cnt;
+            for (wait_cnt = 0; wait_cnt < 30; wait_cnt = wait_cnt + 1) begin
+                @(posedge m3_src_clk); #1;
+                if (m3_src_ready) disable c6_wait_ready;
+            end
+        end
+
+        m3_src_data  = 32'h12345678;
+        m3_src_valid = 1;
+        @(posedge m3_src_clk); #1;
+        m3_src_valid = 0;
+
+        // Wait a few cycles for transfer to be in-flight, then reset
+        repeat (3) @(posedge m3_dst_clk);
+        m3_reset_n = 0;
+        #200;
+
+        // Verify outputs are clean during reset
+        check(m3_dst_valid === 1'b0, "M3: dst_valid = 0 after mid-transfer reset");
+
+        // Release reset and verify recovery
+        m3_reset_n = 1;
+        @(posedge m3_src_clk);
+        m3_dst_ready = 1;
+
+        // Wait for src_ready to reassert (module recovered)
+        begin : c6_recovery_wait
+            integer wait_cnt;
+            reg recovered;
+            recovered = 0;
+            for (wait_cnt = 0; wait_cnt < 50; wait_cnt = wait_cnt + 1) begin
+                @(posedge m3_src_clk); #1;
+                if (m3_src_ready) begin
+                    recovered = 1;
+                    disable c6_recovery_wait;
+                end
+            end
+            check(recovered, "M3: src_ready reasserts after mid-transfer reset recovery");
+        end
+
+        // Verify a new transfer works after recovery
+        m3_src_data  = 32'hABCD0000;
+        m3_src_valid = 1;
+        @(posedge m3_src_clk); #1;
+        m3_src_valid = 0;
+
+        begin : c6_post_reset_xfer
+            integer wait_cnt;
+            for (wait_cnt = 0; wait_cnt < 30; wait_cnt = wait_cnt + 1) begin
+                @(posedge m3_dst_clk); #1;
+                if (m3_dst_valid) disable c6_post_reset_xfer;
+            end
+        end
+        check(m3_dst_valid === 1'b1, "M3: dst_valid asserts for post-recovery transfer");
+        check(m3_dst_data === 32'hABCD0000, "M3: data 0xABCD0000 correct after reset recovery");
 
         // ════════════════════════════════════════════════════════
         // Summary

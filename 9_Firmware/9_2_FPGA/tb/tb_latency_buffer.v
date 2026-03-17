@@ -136,11 +136,13 @@ module tb_latency_buffer;
         end
 
         $display("  First valid output at input sample #%0d (expected ~%0d)",
-                 first_valid_cycle, LATENCY);
+                 first_valid_cycle, LATENCY + 1);
         // After LATENCY samples written, buffer_has_data goes high.
-        // On the NEXT valid_in, valid_out fires. So first valid is at sample LATENCY.
-        check(first_valid_cycle == LATENCY,
-              "First valid output appears at sample LATENCY");
+        // On the NEXT valid_in, valid_out_reg fires. Then valid_out_pipe
+        // (the actual output) fires one cycle later due to BRAM read register.
+        // So first valid is at sample LATENCY + 1.
+        check(first_valid_cycle == LATENCY + 1,
+              "First valid output appears at sample LATENCY+1 (BRAM read pipeline)");
 
         // ════════════════════════════════════════════════════════
         // TEST GROUP 4: Data integrity (exact delay)
@@ -151,20 +153,10 @@ module tb_latency_buffer;
         // Feed samples: value = (i + 100)
         // After priming, each valid output should match data_in from LATENCY samples ago.
         //
-        // NOTE: The DUT calculates read_ptr from write_ptr BEFORE write_ptr is
-        // updated on this cycle. Specifically, the read_ptr is set using the
-        // current write_ptr value, which points to where the CURRENT sample
-        // is about to be written. The BRAM read is combinational
-        // (data_out = bram[read_ptr]).
-        //
-        // When buffer_has_data && valid_in:
-        //   read_ptr <= write_ptr - LATENCY  (mod 4096)
-        // But write_ptr hasn't incremented yet this cycle. So read_ptr will
-        // point to (old_write_ptr - LATENCY). The output appears one cycle later
-        // because read_ptr is registered, and BRAM read is combinational on read_ptr.
-        //
-        // Net effect: output at input cycle K has value of input cycle (K - LATENCY - 1).
-        // We verify this empirically.
+        // The DUT calculates read_ptr from write_ptr, with BRAM read output
+        // registered for Block RAM inference. This adds 1 cycle of read latency
+        // beyond the LATENCY parameter. The valid_out pipeline stage tracks this.
+        // The auto-calibration below handles any offset empirically.
 
         begin : data_check_block
             reg all_match;
@@ -242,15 +234,17 @@ module tb_latency_buffer;
             @(posedge clk); #1;
         end
 
-        // Now de-assert valid_in — no more outputs expected
+        // Now de-assert valid_in — after pipeline drains (1 cycle), no more outputs
         valid_in = 0;
         data_in  = 32'hDEADBEEF;
+        // Allow 1 cycle for the valid pipeline to drain
+        @(posedge clk); #1;
         valid_output_count = 0;
         for (i = 0; i < 20; i = i + 1) begin
             @(posedge clk); #1;
             if (valid_out) valid_output_count = valid_output_count + 1;
         end
-        check(valid_output_count == 0, "No output when valid_in deasserted");
+        check(valid_output_count == 0, "No output when valid_in deasserted (after pipeline drain)");
 
         // ════════════════════════════════════════════════════════
         // TEST GROUP 6: Intermittent valid_in
@@ -349,6 +343,10 @@ module tb_latency_buffer;
             valid_in = 1;
             @(posedge clk); #1;
         end
+        // Feed one more cycle to ensure pipeline has flushed
+        data_in = 32'hFFFF;
+        valid_in = 1;
+        @(posedge clk); #1;
         // Should be producing outputs now
         check(valid_out === 1'b1, "Outputs flowing before mid-op reset");
 

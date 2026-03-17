@@ -677,8 +677,11 @@ set_property IOB TRUE [get_cells -hierarchical -filter {NAME =~ *oddr_ft601_clk*
 set_property -quiet IOB TRUE [get_cells -hierarchical -filter {NAME =~ *usb_inst/ft601_data_out_reg*}]
 set_property -quiet IOB TRUE [get_cells -hierarchical -filter {NAME =~ *usb_inst/ft601_be_reg*}]
 set_property IOB TRUE [get_cells -hierarchical -filter {NAME =~ *usb_inst/ft601_wr_n_reg*}]
-set_property IOB TRUE [get_cells -hierarchical -filter {NAME =~ *usb_inst/ft601_rd_n_reg*}]
-set_property IOB TRUE [get_cells -hierarchical -filter {NAME =~ *usb_inst/ft601_oe_n_reg*}]
+# ft601_rd_n and ft601_oe_n are constant-1 (USB read not implemented) —
+# Vivado removes the registers via constant propagation. Use -quiet to
+# suppress CRITICAL WARNING [Common 17-55] when the cells don't exist.
+set_property -quiet IOB TRUE [get_cells -hierarchical -filter {NAME =~ *usb_inst/ft601_rd_n_reg*}]
+set_property -quiet IOB TRUE [get_cells -hierarchical -filter {NAME =~ *usb_inst/ft601_oe_n_reg*}]
 
 # ============================================================================
 # TIMING EXCEPTIONS — CIC DECIMATOR

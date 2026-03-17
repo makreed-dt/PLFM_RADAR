@@ -22,7 +22,8 @@ module radar_transmitter(
     // System Clocks
     input wire clk_100m,           // System clock
     input wire clk_120m_dac,       // 120MHz DAC clock
-    input wire reset_n,
+    input wire reset_n,            // Reset synchronized to clk_120m_dac
+    input wire reset_100m_n,       // Reset synchronized to clk_100m (for edge detectors/CDC)
     
     // DAC Interface
     output wire [7:0] dac_data,
@@ -79,10 +80,27 @@ module radar_transmitter(
 
     );
 	 
+// ========== SPI LEVEL SHIFTER PASSTHROUGH ==========
+// FPGA bridges 3.3V STM32 SPI bus (Bank 15) to 1.8V ADAR1000 SPI bus (Bank 34).
+// The FPGA I/O banks handle the actual voltage translation; these assigns
+// route the signals through the fabric.
+assign stm32_sclk_1v8      = stm32_sclk_3v3;
+assign stm32_mosi_1v8       = stm32_mosi_3v3;
+assign stm32_miso_3v3       = stm32_miso_1v8;
+assign stm32_cs_adar1_1v8   = stm32_cs_adar1_3v3;
+assign stm32_cs_adar2_1v8   = stm32_cs_adar2_3v3;
+assign stm32_cs_adar3_1v8   = stm32_cs_adar3_3v3;
+assign stm32_cs_adar4_1v8   = stm32_cs_adar4_3v3;
+
 // Edge Detection Signals
 wire new_chirp_pulse;
 wire new_elevation_pulse;
 wire new_azimuth_pulse;
+
+// CDC: Synchronized versions of async STM32 GPIO inputs to clk_100m
+wire stm32_new_chirp_sync;
+wire stm32_new_elevation_sync;
+wire stm32_new_azimuth_sync;
 
 // CDC: Synchronized versions of signals crossing clk_100m -> clk_120m_dac
 wire mixers_enable_120m;   // stm32_mixers_enable sync'd to clk_120m_dac
@@ -98,8 +116,8 @@ wire chirp_sequence_done;
 // would miss it (120/100 MHz ratio). Toggle CDC converts pulse to level toggle,
 // syncs the toggle, then detects edges on the destination side.
 reg chirp_toggle_100m;
-always @(posedge clk_100m or negedge reset_n) begin
-    if (!reset_n)
+always @(posedge clk_100m or negedge reset_100m_n) begin
+    if (!reset_100m_n)
         chirp_toggle_100m <= 1'b0;
     else if (new_chirp_pulse)
         chirp_toggle_100m <= ~chirp_toggle_100m;
@@ -134,25 +152,54 @@ cdc_single_bit #(.STAGES(3)) cdc_mixers_en_120m (
     .dst_signal(mixers_enable_120m)
 );
 
+// CDC synchronizers: async STM32 GPIO inputs -> clk_100m domain
+// These prevent metastability in the edge detectors. Without these,
+// the edge detector's first FF can go metastable, and the XOR output
+// can glitch, producing false chirp/elevation/azimuth pulses.
+cdc_single_bit #(.STAGES(2)) cdc_stm32_chirp (
+    .src_clk(clk_100m),         // Pseudo-source for async GPIO
+    .dst_clk(clk_100m),
+    .reset_n(reset_100m_n),
+    .src_signal(stm32_new_chirp),
+    .dst_signal(stm32_new_chirp_sync)
+);
+
+cdc_single_bit #(.STAGES(2)) cdc_stm32_elevation (
+    .src_clk(clk_100m),
+    .dst_clk(clk_100m),
+    .reset_n(reset_100m_n),
+    .src_signal(stm32_new_elevation),
+    .dst_signal(stm32_new_elevation_sync)
+);
+
+cdc_single_bit #(.STAGES(2)) cdc_stm32_azimuth (
+    .src_clk(clk_100m),
+    .dst_clk(clk_100m),
+    .reset_n(reset_100m_n),
+    .src_signal(stm32_new_azimuth),
+    .dst_signal(stm32_new_azimuth_sync)
+);
+
 // Enhanced STM32 Input Edge Detection with Debouncing
+// Inputs are now CDC-synchronized (safe from metastability)
 edge_detector_enhanced chirp_edge (
     .clk(clk_100m),
-    .reset_n(reset_n),
-    .signal_in(stm32_new_chirp),
+    .reset_n(reset_100m_n),
+    .signal_in(stm32_new_chirp_sync),
     .rising_falling_edge(new_chirp_pulse)            
 );
 
 edge_detector_enhanced elevation_edge (
     .clk(clk_100m),
-    .reset_n(reset_n),
-    .signal_in(stm32_new_elevation),
+    .reset_n(reset_100m_n),
+    .signal_in(stm32_new_elevation_sync),
     .rising_falling_edge(new_elevation_pulse)
 );
 
 edge_detector_enhanced azimuth_edge (
     .clk(clk_100m),
-    .reset_n(reset_n),
-    .signal_in(stm32_new_azimuth),
+    .reset_n(reset_100m_n),
+    .signal_in(stm32_new_azimuth_sync),
     .rising_falling_edge(new_azimuth_pulse)
 );
 

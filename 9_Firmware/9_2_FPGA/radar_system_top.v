@@ -255,13 +255,19 @@ cdc_single_bit #(.STAGES(2)) cdc_ft601_txe_status (
 // ============================================================================
 
 // CDC for chirp_counter: 6-bit multi-bit Gray-code synchronizer
+// Source domain is clk_120m_dac, so reset must be synchronized to that domain.
+// The cdc_adc_to_processing module uses synchronous reset internally, so
+// using sys_reset_120m_n (120m-synchronized) is correct for the source side.
+// The destination side will sample it synchronously on dst_clk, which at worst
+// delays reset deassertion by 1-2 cycles — acceptable for CDC reset.
 cdc_adc_to_processing #(
     .WIDTH(6),
     .STAGES(3)
 ) cdc_chirp_counter (
     .src_clk(clk_120m_dac_buf),
     .dst_clk(clk_100m_buf),
-    .reset_n(sys_reset_n),
+    .src_reset_n(sys_reset_120m_n),
+    .dst_reset_n(sys_reset_n),
     .src_data(tx_current_chirp),
     .src_valid(1'b1),           // Always valid — counter updates continuously
     .dst_data(tx_current_chirp_sync),
@@ -308,7 +314,8 @@ radar_transmitter tx_inst (
     // System Clocks
     .clk_100m(clk_100m_buf),
     .clk_120m_dac(clk_120m_dac_buf),
-    .reset_n(sys_reset_120m_n),  // Use 120 MHz-synchronized reset
+    .reset_n(sys_reset_120m_n),    // 120 MHz-synchronized reset for DAC-domain logic
+    .reset_100m_n(sys_reset_n),    // 100 MHz-synchronized reset for edge detectors/CDC
     
     // DAC Interface
     .dac_data(dac_data),
