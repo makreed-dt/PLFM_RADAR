@@ -24,29 +24,28 @@
     <section class="hero">
       <p class="eyebrow">Execution Checklist</p>
       <h1>Hardware Bring-Up Plan</h1>
-      <p>Operational sequence and pass/fail gates for Day-1 and post-Day-1 validation.</p>
+      <p>Pre-arrival completeness gates, board-day smoke tests, and fault-localization rules for the first FPGA module and carrier-board sessions.</p>
     </section>
 
     <section class="card" style="margin-top:0.8rem;">
-      <h2>Bring-up gates</h2>
+      <h2>Pre-arrival completeness gates</h2>
       <div class="table-wrap">
         <table>
           <thead>
             <tr>
-              <th>Step</th>
+              <th>Gate</th>
               <th>Objective</th>
               <th>Pass Criteria</th>
+              <th>Evidence</th>
             </tr>
           </thead>
           <tbody>
-            <tr><td>1</td><td>Program baseline bitstream</td><td>JTAG detect + successful configuration</td></tr>
-            <tr><td>2</td><td>Clock/reset sanity</td><td>Stable clocks and deterministic reset release</td></tr>
-            <tr><td>3</td><td>ADC front-end</td><td>Valid raw data visible in ILA on expected clock</td></tr>
-            <tr><td>4</td><td>DDC verification</td><td>Expected valid strobe and non-zero I/Q outputs</td></tr>
-            <tr><td>5</td><td>Matched filter stage</td><td>Range profile valid asserted and segment flow correct</td></tr>
-            <tr><td>6</td><td>Range/Doppler pipeline</td><td>Deterministic frame outputs with full bin coverage</td></tr>
-            <tr><td>7</td><td>USB host link</td><td>Sustained transfer and stable framing over soak window</td></tr>
-            <tr><td>8</td><td>Thermal/power screen</td><td>No rail anomalies or thermal runaway under load</td></tr>
+            <tr><td>1</td><td>Freeze known-good firmware and bitstream baselines</td><td>Tracked commit, named artifact set, and repeatable programming flow are available</td><td>Git commit, bitstream path, reports, programming TCL</td></tr>
+            <tr><td>2</td><td>Preserve clean implementation constraints</td><td>Positive WNS/WHS/WPWS, XDCB-5 cleared, only documented methodology residue remains</td><td>Timing summary and methodology report</td></tr>
+            <tr><td>3</td><td>Keep regressions green before board arrival</td><td>MCU host tests and FPGA regression/integration suites pass on the tracked tree</td><td>15/15 MCU and 18/18 FPGA logs</td></tr>
+            <tr><td>4</td><td>Make first-power-on behavior observable</td><td>Clock, LO, beamformer, PA, and USB status can be identified from logs or status outputs</td><td>DIAG coverage, status fields, ILA/debug plan</td></tr>
+            <tr><td>5</td><td>Prepare board-arrival execution checklist</td><td>Power order, abort criteria, and host-side capture steps are written and reviewed</td><td>This page plus reports and scripts references</td></tr>
+            <tr><td>6</td><td>Document unresolved pre-hardware risks</td><td>Open issues are explicitly listed so Day-0 findings are interpreted correctly</td><td>Known-open-risks section below</td></tr>
           </tbody>
         </table>
       </div>
@@ -54,28 +53,104 @@
 
     <section class="grid-2" style="margin-top:0.8rem;">
       <article class="card">
-        <h2>Day-1 quick sequence</h2>
+        <h2>Board-arrival smoke test</h2>
         <ol>
-          <li>Mount SoM on carrier and verify supply/jumper defaults.</li>
-          <li>Program minimal heartbeat top for immediate hardware liveness check.</li>
-          <li>Program debug bitstream and attach LTX for ILA sessions.</li>
-          <li>Capture first ADC and DDC traces, compare with expected signatures.</li>
+          <li>Inspect carrier defaults, regulator enables, jumpers, and any board-level clock source selections before power is applied.</li>
+          <li>Power the carrier and module in the safest configuration with RF transmit paths disabled and document current draw immediately.</li>
+          <li>Run the FPGA programming flow, verify JTAG enumeration, and confirm DONE and INIT_COMPLETE from the hardware manager script.</li>
+          <li>Check deterministic reset release and heartbeat/status outputs before enabling any analog or RF-dependent function.</li>
+          <li>Bring up MCU firmware logging, confirm AD9523 status pins, LO initialization results, and beamformer communication readback.</li>
+          <li>Use the debug-capable FPGA image and probes to confirm raw ADC, DDC, matched-filter, and USB-path activity in that order.</li>
+          <li>Exercise the FT601 path with known framing expectations before any long-duration streaming test.</li>
+          <li>Only after all previous steps pass, begin PA bias, calibration, and higher-risk RF activation.</li>
         </ol>
       </article>
       <article class="card">
-        <h2>Risk controls</h2>
+        <h2>Abort criteria</h2>
         <ul>
-          <li>Keep production target untouched; use split dev targets for carrier-specific pinouts.</li>
-          <li>Do not rely on RTL hierarchical net names in post-synth debug scripts.</li>
-          <li>Run timing/CDC/exceptions checks after every target migration update.</li>
-          <li>Use a repeatable program-capture checklist to detect intermittent reset/clock issues.</li>
+          <li>Stop immediately on unexpected rail current, regulator instability, or thermal rise beyond the planned idle envelope.</li>
+          <li>Do not continue past LO bring-up if the lock GPIOs or lock-status reads disagree repeatedly.</li>
+          <li>Stop RF activation if beamformer scratchpad/readback checks fail on any device.</li>
+          <li>Do not continue USB stress testing if framing, backpressure, or bus-direction behavior is inconsistent.</li>
+          <li>Revert to the heartbeat or debug image if reset sequencing or clock presence is ambiguous.</li>
+          <li>Keep the production-target constraints and pinout source untouched while bring-up-specific targets are being adjusted.</li>
         </ul>
       </article>
+    </section>
+
+    <section class="card" style="margin-top:0.8rem;">
+      <h2>First-power-on observability targets</h2>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Subsystem</th>
+              <th>What must be visible</th>
+              <th>Expected evidence</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td>FPGA configuration</td><td>JTAG enumeration, DONE, INIT_COMPLETE, optional ILA probe presence</td><td>program_fpga.tcl summary and hardware-manager status</td></tr>
+            <tr><td>Clocking</td><td>AD9523 status pins and deterministic downstream reset release</td><td>DIAG clock messages and status GPIO snapshots</td></tr>
+            <tr><td>LO chain</td><td>ADF4382A init status, timed-sync path status, TX/RX lock state</td><td>USART3 DIAG log plus lock GPIO behavior</td></tr>
+            <tr><td>Beamformer control</td><td>Per-device communication sanity and basic temperature readback</td><td>ADAR1000 scratchpad/readback and temperature prints</td></tr>
+            <tr><td>PA biasing</td><td>DAC/ADC bring-up progression and IDQ calibration convergence bounds</td><td>Per-channel PA DIAG output with stop conditions</td></tr>
+            <tr><td>FPGA data path</td><td>ADC, DDC, matched-filter, and USB-path activity in sequence</td><td>ILA captures and system status outputs</td></tr>
+            <tr><td>USB/FT601 link</td><td>Stable framing, no obvious underrun/backpressure surprises, host decode sanity</td><td>Host capture script output and stable packet boundaries</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="grid-2" style="margin-top:0.8rem;">
+      <article class="card">
+        <h2>Required artifacts before hardware arrives</h2>
+        <ul>
+          <li>Named firmware baseline commit and build instructions for the MCU image.</li>
+          <li>Named FPGA baseline bitstream and matching `.ltx` probes file for debug sessions.</li>
+          <li>Current production-target XDC, timing summary, and methodology report.</li>
+          <li>Programming and debug TCL scripts for baseline and debug images.</li>
+          <li>Regression evidence for the tracked branch: MCU host suite and FPGA regression/integration suite.</li>
+          <li>Day-0 measurement sheet covering supply currents, temperatures, and observed status outputs.</li>
+        </ul>
+      </article>
+      <article class="card">
+        <h2>Host-side tools and workflows</h2>
+        <ul>
+          <li>JTAG programming workflow using the checked-in Vivado TCL scripts.</li>
+          <li>Serial capture on USART3 with timestamps preserved for bring-up logs.</li>
+          <li>FT601 or host-side USB capture/decoder workflow to validate framing and payload stability.</li>
+          <li>ILA capture workflow for raw ADC, DDC, matched-filter, and USB-domain checkpoints.</li>
+          <li>Repeatable checklist for baseline image, debug image, and rollback image selection.</li>
+        </ul>
+      </article>
+    </section>
+
+    <section class="card" style="margin-top:0.8rem;">
+      <h2>Known open risks before board arrival</h2>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Risk</th>
+              <th>Current state</th>
+              <th>Day-0 handling</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td>Residual FT601 methodology warning</td><td>Production-target XDC cleanup is validated, but one `ft601_txe` methodology residue remains documented.</td><td>Treat as a known observation item and verify real FT601 status behavior before attempting deeper constraint churn.</td></tr>
+            <tr><td>RF control-path realism</td><td>Firmware sequencing and diagnostics improved, but LO sync, phase behavior, and beamformer control still require physical validation.</td><td>Use readback-first bring-up and do not assume analog behavior from simulation or logs alone.</td></tr>
+            <tr><td>Prototype-grade top-level functional assumptions</td><td>The active FPGA baseline is regression-clean, but some radar-function behavior still needs real-board confirmation under actual I/O conditions.</td><td>Validate each data-path stage incrementally with ILA and host captures before full streaming claims.</td></tr>
+            <tr><td>PA calibration boundaries</td><td>IDQ calibration logic is much safer than before, but real-device convergence and margin limits are not yet board-proven.</td><td>Use conservative limits, observe every channel, and stop on abnormal current or non-convergent channels.</td></tr>
+            <tr><td>Board-specific integration unknowns</td><td>Carrier/module interaction, rails, clocks, and connector assumptions remain partially unproven until first assembly.</td><td>Begin with lowest-risk heartbeat and configuration checks before enabling higher-energy subsystems.</td></tr>
+          </tbody>
+        </table>
+      </div>
     </section>
   </main>
 
   <footer class="footer">
-    <div class="container"><p>This checklist is the operational source of truth for hardware execution.</p></div>
+    <div class="container"><p>This page is the operational source of truth for pre-arrival readiness and first-power-on execution.</p></div>
   </footer>
 </body>
 </html>

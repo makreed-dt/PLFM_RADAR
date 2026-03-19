@@ -24,33 +24,33 @@
     <section class="hero">
       <p class="eyebrow">Open-Source Phased Array Radar</p>
       <h1>Engineering Documentation Site</h1>
-      <p>This site tracks architecture, FPGA improvements, timing closure outcomes, and hardware bring-up readiness for AERIS-10.</p>
+      <p>This site tracks architecture, validated implementation baselines, constraint cleanup progress, and pre-hardware bring-up readiness for AERIS-10.</p>
       <div class="cta-row">
         <a class="button" href="implementation-log.html">View Change Timeline</a>
-        <a class="button ghost" href="bring-up.html">Open Bring-Up Checklist</a>
+        <a class="button ghost" href="bring-up.html">Open Readiness Package</a>
       </div>
     </section>
 
     <section class="stats-grid">
       <article class="card stat">
-        <h2>Build 13 Timing</h2>
-        <p class="metric">WNS +0.311 ns</p>
-        <p class="muted">TNS 0.000, WHS +0.060, THS 0.000</p>
+        <h2>Tracked Timing Baseline</h2>
+        <p class="metric">WNS +0.058 ns</p>
+        <p class="muted">WHS +0.068, WPWS +0.684 after validated Build 16 XDC port</p>
       </article>
       <article class="card stat">
         <h2>Regression Status</h2>
-        <p class="metric">13 / 13 Suites</p>
-        <p class="muted">Integration golden match: 2048 / 2048</p>
+        <p class="metric">MCU 15 / 15, FPGA 18 / 18</p>
+        <p class="muted">Host firmware regression plus FPGA unit and integration suites passing</p>
       </article>
       <article class="card stat">
-        <h2>Debug Instrumentation</h2>
-        <p class="metric">4 ILA Cores</p>
-        <p class="muted">92 probe bits, 4096 depth</p>
+        <h2>Methodology State</h2>
+        <p class="metric">XDCB-5 = 0</p>
+        <p class="muted">Single documented TIMING-18 residue on `ft601_txe` async observation</p>
       </article>
       <article class="card stat">
         <h2>Current Phase</h2>
-        <p class="metric">Hardware Bring-Up</p>
-        <p class="muted">TE0712/TE0713 split targets prepared</p>
+        <p class="metric">Pre-Hardware Readiness</p>
+        <p class="muted">Board-arrival smoke test, artifact inventory, and open-risk tracking prepared</p>
       </article>
     </section>
 
@@ -58,11 +58,11 @@
       <article class="card">
         <h2>What changed recently</h2>
         <ul>
-          <li>Closed timing on XC7A200T target and froze Build 13 candidate.</li>
-          <li>Added CDC waivers for 5 verified false positives.</li>
-          <li>Created resilient ILA insertion flow with post-synthesis net discovery.</li>
-          <li>Generated baseline and debug bitstreams for bring-up.</li>
-          <li>Added TE0712/TE0701 and TE0713/TE0701 split build targets.</li>
+          <li>Ported the validated Build 16 production-target XDC cleanup into the tracked repository.</li>
+          <li>Preserved positive post-route timing while clearing XDCB-5 and reducing methodology residue to a single documented item.</li>
+          <li>Validated the tracked branch with MCU host regression and FPGA regression/integration suites.</li>
+          <li>Refreshed the bring-up documentation into a pre-arrival readiness package for the FPGA module and carrier board.</li>
+          <li>Kept upstream ADAR1000 bulk imports out of the baseline pending selective, justified reuse only.</li>
         </ul>
       </article>
       <article class="card">
@@ -70,8 +70,8 @@
         <ul>
           <li><a href="architecture.html">System and FPGA Architecture</a></li>
           <li><a href="implementation-log.html">Detailed Engineering Change Log</a></li>
-          <li><a href="bring-up.html">Hardware Bring-Up Plan and Exit Criteria</a></li>
-          <li><a href="reports.html">Antenna/Python reports and generated artifacts</a></li>
+          <li><a href="bring-up.html">Pre-Arrival Bring-Up Plan, Artifact Checklist, and Open Risks</a></li>
+          <li><a href="reports.html">Published reports, simulations, and artifact context</a></li>
           <li><a href="release-notes.html">Release Notes by Key Commit</a></li>
         </ul>
       </article>
