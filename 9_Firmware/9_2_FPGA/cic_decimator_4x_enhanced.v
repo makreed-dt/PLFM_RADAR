@@ -475,7 +475,8 @@ assign pcout_3 = sim_int_3;
 // ============================================================================
 // CONTROL AND MONITORING (fabric logic)
 // ============================================================================
-reg signed [COMB_WIDTH-1:0] integrator_sampled;
+(* keep = "true", dont_touch = "true" *) reg signed [COMB_WIDTH-1:0] integrator_sampled;
+(* keep = "true", dont_touch = "true", max_fanout = 1 *) reg signed [COMB_WIDTH-1:0] integrator_sampled_comb;
 (* use_dsp = "yes" *) reg signed [COMB_WIDTH-1:0] comb [0:STAGES-1];
 reg signed [COMB_WIDTH-1:0] comb_delay [0:STAGES-1][0:COMB_DELAY-1];
 
@@ -483,6 +484,7 @@ reg signed [COMB_WIDTH-1:0] comb_delay [0:STAGES-1][0:COMB_DELAY-1];
 reg [1:0] decimation_counter;
 (* keep = "true", max_fanout = 4 *) reg data_valid_delayed;
 (* keep = "true", max_fanout = 4 *) reg data_valid_comb;
+(* keep = "true", max_fanout = 4 *) reg data_valid_comb_pipe;
 reg [7:0] output_counter;
 reg [ACC_WIDTH-1:0] max_integrator_value;
 reg overflow_detected;
@@ -522,6 +524,7 @@ initial begin
     decimation_counter = 0;
     data_valid_delayed = 0;
     data_valid_comb = 0;
+    data_valid_comb_pipe = 0;
     output_counter = 0;
     max_integrator_value = 0;
     overflow_detected = 0;
@@ -605,8 +608,12 @@ end
 always @(posedge clk) begin
     if (!reset_n) begin
         data_valid_comb <= 0;
+        data_valid_comb_pipe <= 0;
+        integrator_sampled_comb <= 0;
     end else begin
         data_valid_comb <= data_valid_delayed;
+        data_valid_comb_pipe <= data_valid_comb;
+        integrator_sampled_comb <= integrator_sampled;
     end
 end
 
@@ -650,14 +657,14 @@ always @(posedge clk) begin
             comb_saturation_event_count <= 0;
         end
 
-        if (data_valid_comb) begin
+        if (data_valid_comb_pipe) begin
             for (i = 0; i < STAGES; i = i + 1) begin
                 if (i == 0) begin
-                    comb[0] <= integrator_sampled - comb_delay[0][COMB_DELAY-1];
+                    comb[0] <= integrator_sampled_comb - comb_delay[0][COMB_DELAY-1];
                     for (j = COMB_DELAY-1; j > 0; j = j - 1) begin
                         comb_delay[0][j] <= comb_delay[0][j-1];
                     end
-                    comb_delay[0][0] <= integrator_sampled;
+                    comb_delay[0][0] <= integrator_sampled_comb;
                 end else begin
                     comb[i] <= comb[i-1] - comb_delay[i][COMB_DELAY-1];
                     for (j = COMB_DELAY-1; j > 0; j = j - 1) begin

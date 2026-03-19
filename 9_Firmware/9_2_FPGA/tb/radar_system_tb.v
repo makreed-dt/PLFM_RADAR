@@ -297,7 +297,7 @@ initial begin
         
         // Generate echo signal when transmitter is active
         if (tx_mixer_en && fpga_rf_switch) begin
-            adc_data_pattern = generate_radar_echo(sample_count);
+            compute_radar_echo(sample_count);
         end else begin
             adc_data_pattern = 8'h80;  // Mid-scale noise floor
         end
@@ -311,35 +311,8 @@ initial begin
     end
 end
 
-// Function to generate radar echo based on multiple targets
-function [7:0] generate_radar_echo;
-    input integer sample;
-    integer t;
-    integer echo_sum;
-    integer chirp_phase;
-    reg [7:0] result;
-begin
-    echo_sum = 128;  // DC offset
-    
-    for (t = 0; t < 5; t = t + 1) begin
-        if (echo_delay[t] > 0 && sample > echo_delay[t]) begin
-            // Simple Doppler modulation
-            chirp_phase = ((sample - echo_delay[t]) * 10) % 256;
-            echo_sum = echo_sum + $signed({1'b0, echo_amplitude[t]}) * 
-                       $signed({1'b0, sin_lut[chirp_phase + echo_phase[t]]}) / 128;
-        end
-    end
-    
-    // Clamp to 8-bit range
-    if (echo_sum > 255) echo_sum = 255;
-    if (echo_sum < 0) echo_sum = 0;
-    
-    result = echo_sum[7:0];
-    generate_radar_echo = result;
-end
-endfunction
-
 // Sine LUT for echo modulation (pre-computed, equivalent to 128 + 127*sin(2*pi*i/256))
+// Declared before task so iverilog can resolve the reference.
 reg [7:0] sin_lut [0:255];
 integer lut_i;
 initial begin
@@ -408,6 +381,35 @@ initial begin
     sin_lut[248] = 103; sin_lut[249] = 106; sin_lut[250] = 109; sin_lut[251] = 112;
     sin_lut[252] = 116; sin_lut[253] = 119; sin_lut[254] = 122; sin_lut[255] = 125;
 end
+
+// Task to generate radar echo based on multiple targets
+// (Uses task instead of function so iverilog can access module-level memories)
+task compute_radar_echo;
+    input integer sample;
+    integer t;
+    integer echo_sum;
+    integer chirp_phase;
+    integer lut_idx;
+begin
+    echo_sum = 128;  // DC offset
+    
+    for (t = 0; t < 5; t = t + 1) begin
+        if (echo_delay[t] > 0 && sample > echo_delay[t]) begin
+            // Simple Doppler modulation
+            chirp_phase = ((sample - echo_delay[t]) * 10) % 256;
+            lut_idx = (chirp_phase + echo_phase[t]) % 256;
+            echo_sum = echo_sum + $signed({1'b0, echo_amplitude[t]}) * 
+                       $signed({1'b0, sin_lut[lut_idx]}) / 128;
+        end
+    end
+    
+    // Clamp to 8-bit range
+    if (echo_sum > 255) echo_sum = 255;
+    if (echo_sum < 0) echo_sum = 0;
+    
+    adc_data_pattern = echo_sum[7:0];
+end
+endtask
 
 // ============================================================================
 // SPI COMMUNICATION MONITORING

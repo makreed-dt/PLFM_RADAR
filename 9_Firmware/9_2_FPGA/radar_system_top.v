@@ -180,6 +180,12 @@ reg [3:0] status_reg;
 // CLOCK BUFFERING
 // ============================================================================
 
+`ifdef SIMULATION
+// In simulation (iverilog), BUFG is not available — pass-through assigns
+assign clk_100m_buf     = clk_100m;
+assign clk_120m_dac_buf = clk_120m_dac;
+assign ft601_clk_buf    = ft601_clk_in;
+`else
 BUFG bufg_100m (
     .I(clk_100m),
     .O(clk_100m_buf)
@@ -194,6 +200,7 @@ BUFG bufg_ft601 (
     .I(ft601_clk_in),
     .O(ft601_clk_buf)
 );
+`endif
 
 // Reset synchronization (clk_100m domain)
 (* ASYNC_REG = "TRUE" *) reg [1:0] reset_sync;
